@@ -235,8 +235,9 @@ LRESULT CALLBACK editWndProc(HWND wnd, UINT msg, WPARAM wparam, LPARAM lparam)
 			}
 			break;
 		// Return - Ignore (handled in WM_KEYDOWN)
-		case 0x0a:
-		case 0x0d:
+		case 0x0A:  // swallow CTRL+J (Line Feed)
+		case 0x0B:  // Swallow CTRL+K (Vertical Tab)
+		case 0x0D:
 			return 0;
 		default:
 			result = CallWindowProc(state->editWndProc, wnd, msg, wparam, lparam);
@@ -244,7 +245,27 @@ LRESULT CALLBACK editWndProc(HWND wnd, UINT msg, WPARAM wparam, LPARAM lparam)
 		updateSearchResults(state); // TODO: debounce on large entry set?
 		return result;
 	case WM_KEYDOWN: // When a key is pressed
+		bool ctrlPressed = (GetKeyState(VK_CONTROL) & 0x8000);
+
 		switch (wparam) {
+			case 0x4A: // J
+				if (ctrlPressed) { // CTRL+j - Down
+					// Same as VK_DOWN
+					state->selectedResultIndex =
+						(state->selectedResultIndex + 1) % state->searchResultCount;
+					RedrawWindow(state->mainWnd, 0, 0, RDW_INVALIDATE);
+					return TRUE;
+				}
+				break;
+			case 0x4B:
+				if (ctrlPressed) { // CTRL+k - Up
+					// Same as VK_UP
+					state->selectedResultIndex =
+						(state->selectedResultIndex - 1 + state->searchResultCount) % state->searchResultCount;
+					RedrawWindow(state->mainWnd, 0, 0, RDW_INVALIDATE);
+					return 0;
+				}
+				break;
 		case VK_RETURN: // Enter - Output choice
 			// If no results or shift is held: print input, else: print result
 			if (state->selectedResultIndex == SELECTED_INDEX_NO_RESULT || (GetKeyState(VK_SHIFT) & 0x8000)) {
@@ -262,7 +283,7 @@ LRESULT CALLBACK editWndProc(HWND wnd, UINT msg, WPARAM wparam, LPARAM lparam)
 			}
 
 			// Quit if control isn't held
-			if (!(GetKeyState(VK_CONTROL) & 0x8000)) {
+			if (!ctrlPressed) {
 				exit(0);
 			}
 			return 0;
