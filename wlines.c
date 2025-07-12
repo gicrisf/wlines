@@ -1001,7 +1001,13 @@ int main(int argc, char **argv)
 		parseStdinEntries(&state);
 	}
 	
-	state.lineCount = min((size_t)state.settings.lineCount, state.entryCount);
+	// In daemon mode, use the configured line count for window sizing
+	// In normal mode, use the minimum of configured lines and actual entries
+	if (state.daemonMode) {
+		state.lineCount = state.settings.lineCount;
+	} else {
+		state.lineCount = min((size_t)state.settings.lineCount, state.entryCount);
+	}
 	createWindow(&state);
 	
 	// Only show window initially if not in daemon mode or if we have entries
