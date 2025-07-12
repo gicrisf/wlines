@@ -46,6 +46,7 @@ typedef int ssize_t;
 #define TRAY_MENU_EXIT 1001
 #define TRAY_MENU_STATUS 1002
 
+
 #define ASSERT_WIN32_RESULT(result) do { \
 		if (!(result)) { \
 			fprintf(stderr, "Windows error %ld on line %d\n", GetLastError(), __LINE__); \
@@ -107,6 +108,23 @@ typedef struct {
 	void *data;
 	size_t count, cap;
 } buf_t;
+
+// Logging function for daemon mode
+void logMessage(const char *message)
+{
+	FILE *logFile = fopen("wlines-daemon.log", "a");
+	if (logFile) {
+		// Get current time
+		SYSTEMTIME st;
+		GetLocalTime(&st);
+		
+		fprintf(logFile, "[%04d-%02d-%02d %02d:%02d:%02d] %s\n",
+			st.wYear, st.wMonth, st.wDay,
+			st.wHour, st.wMinute, st.wSecond,
+			message);
+		fclose(logFile);
+	}
+}
 
 void *xrealloc(void *ptr, size_t sz)
 {
@@ -290,12 +308,18 @@ DWORD WINAPI pipeThreadProc(LPVOID lpParam)
 		
 		// Wait for client connection
 		if (ConnectNamedPipe(state->hPipe, NULL) || GetLastError() == ERROR_PIPE_CONNECTED) {
+			logMessage("Client connected to pipe - reading data");
+			
 			// Read data from pipe
 			char buffer[PIPE_BUFFER_SIZE];
 			DWORD bytesRead;
 			
 			if (ReadFile(state->hPipe, buffer, sizeof(buffer) - 1, &bytesRead, NULL)) {
 				buffer[bytesRead] = '\0';
+				
+				char logMsg[128];
+				snprintf(logMsg, sizeof(logMsg), "Received %lu bytes from client", bytesRead);
+				logMessage(logMsg);
 				
 				// Update entries and show window
 				updateEntriesFromPipe(state, buffer, bytesRead);
@@ -308,7 +332,11 @@ DWORD WINAPI pipeThreadProc(LPVOID lpParam)
 				while (state->hPipe && state->keepRunning) {
 					Sleep(100);
 				}
+			} else {
+				logMessage("Failed to read from pipe");
 			}
+		} else {
+			logMessage("Failed to connect to pipe client");
 		}
 		
 		if (state->hPipe) {
@@ -420,6 +448,7 @@ LRESULT CALLBACK editWndProc(HWND wnd, UINT msg, WPARAM wparam, LPARAM lparam)
 	switch (msg) {
 	case WM_KILLFOCUS: // When focus is lost
 		if (state->daemonMode) {
+			logMessage("Selection window lost focus - hiding window");
 			ShowWindow(state->mainWnd, SW_HIDE);
 		} else {
 			exit(1);
@@ -487,8 +516,17 @@ LRESULT CALLBACK editWndProc(HWND wnd, UINT msg, WPARAM wparam, LPARAM lparam)
 				if (state->daemonMode) {
 					wchar_t *input = getTextboxString(state);
 					if (state->settings.outputIndex) {
+						logMessage("User selected custom input (by index)");
 						sendResultToPipe(state, L"-1");
 					} else {
+						// Log the custom input
+						char logMsg[512];
+						int len = WideCharToMultiByte(CP_UTF8, 0, input, -1, NULL, 0, NULL, NULL);
+						char *utf8Input = malloc(len);
+						WideCharToMultiByte(CP_UTF8, 0, input, -1, utf8Input, len, NULL, NULL);
+						snprintf(logMsg, sizeof(logMsg), "User selected custom input: %s", utf8Input);
+						logMessage(logMsg);
+						free(utf8Input);
 						sendResultToPipe(state, input);
 					}
 				} else {
@@ -500,13 +538,26 @@ LRESULT CALLBACK editWndProc(HWND wnd, UINT msg, WPARAM wparam, LPARAM lparam)
 				}
 			} else {
 				if (state->daemonMode) {
+					// Log the selected option
+					char logMsg[512];
+					wchar_t *selectedEntry = state->entries[state->searchResults[state->selectedResultIndex]];
+					int len = WideCharToMultiByte(CP_UTF8, 0, selectedEntry, -1, NULL, 0, NULL, NULL);
+					char *utf8Entry = malloc(len);
+					WideCharToMultiByte(CP_UTF8, 0, selectedEntry, -1, utf8Entry, len, NULL, NULL);
+					
 					if (state->settings.outputIndex) {
+						snprintf(logMsg, sizeof(logMsg), "User selected option #%zu: %s", 
+							state->searchResults[state->selectedResultIndex], utf8Entry);
+						logMessage(logMsg);
 						wchar_t indexStr[32];
 						swprintf(indexStr, 32, L"%zu", state->searchResults[state->selectedResultIndex]);
 						sendResultToPipe(state, indexStr);
 					} else {
+						snprintf(logMsg, sizeof(logMsg), "User selected option: %s", utf8Entry);
+						logMessage(logMsg);
 						sendResultToPipe(state, state->entries[state->searchResults[state->selectedResultIndex]]);
 					}
+					free(utf8Entry);
 				} else {
 					if (state->settings.outputIndex) {
 						printf("%zu\n", state->searchResults[state->selectedResultIndex]);
@@ -533,6 +584,7 @@ LRESULT CALLBACK editWndProc(HWND wnd, UINT msg, WPARAM wparam, LPARAM lparam)
 			return 0;
 		case VK_ESCAPE: // Escape - Exit
 			if (state->daemonMode) {
+				logMessage("User pressed Escape - cancelling selection");
 				ShowWindow(state->mainWnd, SW_HIDE);
 				updateTrayIcon(state, L"wlines daemon - Ready for connections");
 				if (state->hPipe) {
@@ -770,13 +822,27 @@ LRESULT CALLBACK mainWndProc(HWND wnd, UINT msg, WPARAM wparam, LPARAM lparam)
 		if (newIdx == state->selectedResultIndex) {
 			// Handle double-click - output the selected item
 			if (state->daemonMode) {
+				// Log the mouse selection
+				char logMsg[512];
+				wchar_t *selectedEntry = state->entries[state->searchResults[state->selectedResultIndex]];
+				int len = WideCharToMultiByte(CP_UTF8, 0, selectedEntry, -1, NULL, 0, NULL, NULL);
+				char *utf8Entry = malloc(len);
+				WideCharToMultiByte(CP_UTF8, 0, selectedEntry, -1, utf8Entry, len, NULL, NULL);
+				
 				if (state->settings.outputIndex) {
+					snprintf(logMsg, sizeof(logMsg), "User double-clicked option #%zu: %s", 
+						state->searchResults[state->selectedResultIndex], utf8Entry);
+					logMessage(logMsg);
 					wchar_t indexStr[32];
 					swprintf(indexStr, 32, L"%zu", state->searchResults[state->selectedResultIndex]);
 					sendResultToPipe(state, indexStr);
 				} else {
+					snprintf(logMsg, sizeof(logMsg), "User double-clicked option: %s", utf8Entry);
+					logMessage(logMsg);
 					sendResultToPipe(state, state->entries[state->searchResults[state->selectedResultIndex]]);
 				}
+				free(utf8Entry);
+				
 				// Hide window and close pipe
 				ShowWindow(state->mainWnd, SW_HIDE);
 				updateTrayIcon(state, L"wlines daemon - Ready for connections");
@@ -1131,12 +1197,16 @@ int main(int argc, char **argv)
 		state.entries = NULL;
 		state.searchResults = xrealloc(0, 1 * sizeof(size_t));
 		
+		logMessage("Starting wlines daemon - creating pipe thread");
+		
 		// Start pipe thread
 		state.hPipeThread = CreateThread(NULL, 0, pipeThreadProc, &state, 0, NULL);
 		if (!state.hPipeThread) {
+			logMessage("ERROR: Failed to create pipe thread");
 			fprintf(stderr, "Failed to create pipe thread\n");
 			exit(1);
 		}
+		logMessage("Pipe thread created successfully");
 	} else {
 		// Normal mode - parse stdin
 		parseStdinEntries(&state);
@@ -1156,9 +1226,9 @@ int main(int argc, char **argv)
 		updateSearchResults(&state);
 		state.selectedResultIndex = min((size_t)state.settings.selectedIndex, state.entryCount - 1);
 	} else {
-		// In daemon mode, start hidden
-		ShowWindow(state.mainWnd, SW_HIDE);
-		addTrayIcon(&state);
+	// In daemon mode, start hidden
+	ShowWindow(state.mainWnd, SW_HIDE);
+	addTrayIcon(&state);
 	}
 	
 	windowEventLoop(&state);
