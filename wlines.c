@@ -46,6 +46,7 @@ typedef int ssize_t;
 #define TRAY_MENU_EXIT 1001
 #define TRAY_MENU_STATUS 1002
 #define TRAY_MENU_TOGGLE_WINKEY 1003
+#define TRAY_MENU_TOGGLE_TASKBAR 1004
 
 // Keyboard hook for blocking Windows key
 static HHOOK hKeyboardHook = NULL;
@@ -53,10 +54,16 @@ static bool blockWindowsKey = false;
 static bool winKeyPressed = false;
 static DWORD winKeyPressTime = 0;
 
+// Taskbar auto-hide control
+static bool taskbarAutoHideDisabled = false;
+static HWND hTaskbar = NULL;
+
 // Function declarations
 LRESULT CALLBACK lowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam);
 void installKeyboardHook(void);
 void uninstallKeyboardHook(void);
+void disableTaskbarAutoShow(void);
+void restoreTaskbarAutoShow(void);
 
 #define ASSERT_WIN32_RESULT(result) do { \
 		if (!(result)) { \
@@ -90,6 +97,7 @@ typedef struct {
 	size_t width;
 	bool centerWindow;
 	bool blockWindowsKey;
+	bool blockTaskbarAutoShow;
 } settings_t;
 
 typedef struct {
@@ -210,6 +218,48 @@ void uninstallKeyboardHook(void)
 	}
 }
 
+// Disable taskbar auto-show behavior
+void disableTaskbarAutoShow(void)
+{
+	if (taskbarAutoHideDisabled) return;
+	
+	// Find the taskbar window
+	hTaskbar = FindWindowW(L"Shell_TrayWnd", NULL);
+	if (hTaskbar) {
+		// Check if taskbar is currently auto-hiding
+		APPBARDATA abd = { 0 };
+		abd.cbSize = sizeof(APPBARDATA);
+		abd.hWnd = hTaskbar;
+		
+		UINT state = (UINT)SHAppBarMessage(ABM_GETSTATE, &abd);
+		if (state & ABS_AUTOHIDE) {
+			// Temporarily disable auto-hide by modifying the style
+			// This prevents the taskbar from appearing on hover
+			ShowWindow(hTaskbar, SW_HIDE);
+			taskbarAutoHideDisabled = true;
+			logMessage("Taskbar auto-show disabled - taskbar hidden");
+		} else {
+			logMessage("Taskbar is not in auto-hide mode - no changes made");
+		}
+	} else {
+		logMessage("Could not find taskbar window");
+	}
+}
+
+// Restore taskbar auto-show behavior
+void restoreTaskbarAutoShow(void)
+{
+	if (!taskbarAutoHideDisabled) return;
+	
+	if (hTaskbar && IsWindow(hTaskbar)) {
+		// Restore the taskbar visibility
+		ShowWindow(hTaskbar, SW_SHOW);
+		taskbarAutoHideDisabled = false;
+		hTaskbar = NULL;
+		logMessage("Taskbar auto-show restored - taskbar visible");
+	}
+}
+
 void *xrealloc(void *ptr, size_t sz)
 {
 	ptr = realloc(ptr, sz);
@@ -320,6 +370,8 @@ void showTrayMenu(state_t *state)
 	AppendMenuW(hMenu, MF_SEPARATOR, 0, NULL);
 	AppendMenuW(hMenu, MF_STRING, TRAY_MENU_TOGGLE_WINKEY, 
 		blockWindowsKey ? L"Enable Windows Key" : L"Disable Windows Key");
+	AppendMenuW(hMenu, MF_STRING, TRAY_MENU_TOGGLE_TASKBAR,
+		taskbarAutoHideDisabled ? L"Enable Taskbar Auto-Show" : L"Disable Taskbar Auto-Show");
 	AppendMenuW(hMenu, MF_SEPARATOR, 0, NULL);
 	AppendMenuW(hMenu, MF_STRING, TRAY_MENU_EXIT, L"Exit Daemon");
 	
@@ -795,12 +847,29 @@ LRESULT CALLBACK mainWndProc(HWND wnd, UINT msg, WPARAM wparam, LPARAM lparam)
 						L"Windows Key Disabled", MB_OK | MB_ICONINFORMATION);
 				}
 				return 0;
+			case TRAY_MENU_TOGGLE_TASKBAR:
+				if (taskbarAutoHideDisabled) {
+					restoreTaskbarAutoShow();
+					MessageBoxW(state->mainWnd,
+						L"Taskbar auto-show has been enabled.\n\n"
+						L"The taskbar will now appear when you hover at the bottom.",
+						L"Taskbar Auto-Show Enabled", MB_OK | MB_ICONINFORMATION);
+				} else {
+					disableTaskbarAutoShow();
+					MessageBoxW(state->mainWnd,
+						L"Taskbar auto-show has been disabled.\n\n"
+						L"The taskbar will remain hidden even when hovering.\n"
+						L"Note: This only affects auto-hide taskbars.",
+						L"Taskbar Auto-Show Disabled", MB_OK | MB_ICONINFORMATION);
+				}
+				return 0;
 			case TRAY_MENU_EXIT:
 				if (MessageBoxW(state->mainWnd,
 					L"Are you sure you want to exit the wlines daemon?",
 					L"Exit daemon", MB_YESNO | MB_ICONQUESTION) == IDYES) {
 					removeTrayIcon(state);
 					uninstallKeyboardHook();
+					restoreTaskbarAutoShow();
 					exit(0);
 				}
 				return 0;
@@ -1148,6 +1217,9 @@ void usage()
 		"\t-bw   Block Windows key when daemon is running (default: enabled)\n"
 		"\t      Note: Only blocks standalone Windows key presses, not combinations\n"
 		"\t-nw   Don't block Windows key when daemon is running\n"
+		"\t-bt   Block taskbar auto-show when daemon is running (default: enabled)\n"
+		"\t      Note: Only affects taskbars that are set to auto-hide\n"
+		"\t-nt   Don't block taskbar auto-show when daemon is running\n"
 		"\n"
 		"OPTIONS:\n"
 		"\t-l    <count>   Amount of lines to show in list\n"
@@ -1207,6 +1279,7 @@ int main(int argc, char **argv)
 			.fontSize = 24,
 			.lineCount = 15,
 			.blockWindowsKey = true,
+			.blockTaskbarAutoShow = true,
 		},
 		.keepRunning = true,
 #ifdef DAEMON_MODE
@@ -1234,6 +1307,10 @@ int main(int argc, char **argv)
 			state.settings.blockWindowsKey = true;
 		} else if (!strcmp(argv[i], "-nw")) {
 			state.settings.blockWindowsKey = false;
+		} else if (!strcmp(argv[i], "-bt")) {
+			state.settings.blockTaskbarAutoShow = true;
+		} else if (!strcmp(argv[i], "-nt")) {
+			state.settings.blockTaskbarAutoShow = false;
 		} else if (i + 1 == argc) {
 			usage();
 		// Options
@@ -1320,6 +1397,13 @@ int main(int argc, char **argv)
 			logMessage("Windows key blocking disabled by command line option");
 		}
 		
+		// Disable taskbar auto-show to prevent accidental taskbar appearance
+		if (state.settings.blockTaskbarAutoShow) {
+			disableTaskbarAutoShow();
+		} else {
+			logMessage("Taskbar auto-show blocking disabled by command line option");
+		}
+		
 		// Start pipe thread
 		state.hPipeThread = CreateThread(NULL, 0, pipeThreadProc, &state, 0, NULL);
 		if (!state.hPipeThread) {
@@ -1359,6 +1443,7 @@ int main(int argc, char **argv)
 	if (state.daemonMode) {
 		removeTrayIcon(&state);
 		uninstallKeyboardHook();
+		restoreTaskbarAutoShow();
 	}
 	if (state.hPipeThread) {
 		WaitForSingleObject(state.hPipeThread, 1000);
