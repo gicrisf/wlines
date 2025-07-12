@@ -45,7 +45,18 @@ typedef int ssize_t;
 #define TRAY_ICON_ID 1
 #define TRAY_MENU_EXIT 1001
 #define TRAY_MENU_STATUS 1002
+#define TRAY_MENU_TOGGLE_WINKEY 1003
 
+// Keyboard hook for blocking Windows key
+static HHOOK hKeyboardHook = NULL;
+static bool blockWindowsKey = false;
+static bool winKeyPressed = false;
+static DWORD winKeyPressTime = 0;
+
+// Function declarations
+LRESULT CALLBACK lowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam);
+void installKeyboardHook(void);
+void uninstallKeyboardHook(void);
 
 #define ASSERT_WIN32_RESULT(result) do { \
 		if (!(result)) { \
@@ -78,6 +89,7 @@ typedef struct {
 	int selectedIndex;
 	size_t width;
 	bool centerWindow;
+	bool blockWindowsKey;
 } settings_t;
 
 typedef struct {
@@ -123,6 +135,78 @@ void logMessage(const char *message)
 			st.wHour, st.wMinute, st.wSecond,
 			message);
 		fclose(logFile);
+	}
+}
+
+// Low-level keyboard hook procedure to block Windows key
+LRESULT CALLBACK lowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam)
+{
+	if (nCode >= 0 && blockWindowsKey) {
+		KBDLLHOOKSTRUCT *kbd = (KBDLLHOOKSTRUCT*)lParam;
+		
+		// Handle Windows key presses
+		if (kbd->vkCode == VK_LWIN || kbd->vkCode == VK_RWIN) {
+			if (wParam == WM_KEYDOWN || wParam == WM_SYSKEYDOWN) {
+				// Windows key pressed - remember it but don't block yet
+				winKeyPressed = true;
+				winKeyPressTime = GetTickCount();
+				// Don't block the key down event - let it through for combinations
+			} else if (wParam == WM_KEYUP || wParam == WM_SYSKEYUP) {
+				// Windows key released
+				if (winKeyPressed) {
+					DWORD pressDuration = GetTickCount() - winKeyPressTime;
+					// If the key was pressed alone (no other keys) and for a short time,
+					// it was likely intended to open the Start menu - block it
+					if (pressDuration < 500) { // 500ms threshold
+						logMessage("Blocked Windows key press (pressed alone)");
+						winKeyPressed = false;
+						return 1; // Block the key up event to prevent Start menu
+					}
+				}
+				winKeyPressed = false;
+			}
+		} else if (winKeyPressed) {
+			// Another key was pressed while Windows key is held down
+			// This is a combination (Win+Tab, Win+Arrow, etc.) - allow it
+			if (wParam == WM_KEYDOWN || wParam == WM_SYSKEYDOWN) {
+				char logMsg[256];
+				snprintf(logMsg, sizeof(logMsg), "Allowing Windows key combination (VK_%lu)", kbd->vkCode);
+				logMessage(logMsg);
+				winKeyPressed = false; // Reset flag since it's a combination
+			}
+		}
+	}
+	
+	return CallNextHookEx(hKeyboardHook, nCode, wParam, lParam);
+}
+
+// Install the keyboard hook
+void installKeyboardHook(void)
+{
+	if (!hKeyboardHook) {
+		hKeyboardHook = SetWindowsHookEx(WH_KEYBOARD_LL, lowLevelKeyboardProc, 
+			GetModuleHandle(NULL), 0);
+		if (hKeyboardHook) {
+			blockWindowsKey = true;
+			winKeyPressed = false;
+			winKeyPressTime = 0;
+			logMessage("Keyboard hook installed - Windows key blocked (combinations allowed)");
+		} else {
+			logMessage("Failed to install keyboard hook");
+		}
+	}
+}
+
+// Uninstall the keyboard hook
+void uninstallKeyboardHook(void)
+{
+	if (hKeyboardHook) {
+		blockWindowsKey = false;
+		winKeyPressed = false;
+		winKeyPressTime = 0;
+		UnhookWindowsHookEx(hKeyboardHook);
+		hKeyboardHook = NULL;
+		logMessage("Keyboard hook uninstalled - Windows key restored");
 	}
 }
 
@@ -233,6 +317,9 @@ void showTrayMenu(state_t *state)
 	
 	HMENU hMenu = CreatePopupMenu();
 	AppendMenuW(hMenu, MF_STRING, TRAY_MENU_STATUS, L"Show Status");
+	AppendMenuW(hMenu, MF_SEPARATOR, 0, NULL);
+	AppendMenuW(hMenu, MF_STRING, TRAY_MENU_TOGGLE_WINKEY, 
+		blockWindowsKey ? L"Enable Windows Key" : L"Disable Windows Key");
 	AppendMenuW(hMenu, MF_SEPARATOR, 0, NULL);
 	AppendMenuW(hMenu, MF_STRING, TRAY_MENU_EXIT, L"Exit Daemon");
 	
@@ -690,11 +777,30 @@ LRESULT CALLBACK mainWndProc(HWND wnd, UINT msg, WPARAM wparam, LPARAM lparam)
 					L"Pipe name: \\\\.\\pipe\\wlines_pipe",
 					L"wlines daemon status", MB_OK | MB_ICONINFORMATION);
 				return 0;
+			case TRAY_MENU_TOGGLE_WINKEY:
+				if (blockWindowsKey) {
+					uninstallKeyboardHook();
+					logMessage("Windows key blocking disabled by user");
+					MessageBoxW(state->mainWnd,
+						L"Windows key blocking has been disabled.\n\n"
+						L"The Start menu is now accessible.",
+						L"Windows Key Enabled", MB_OK | MB_ICONINFORMATION);
+				} else {
+					installKeyboardHook();
+					logMessage("Windows key blocking enabled by user");
+					MessageBoxW(state->mainWnd,
+						L"Windows key blocking has been enabled.\n\n"
+						L"The Start menu is now blocked.\n"
+						L"Key combinations (Win+Tab, Win+Arrow, etc.) still work.",
+						L"Windows Key Disabled", MB_OK | MB_ICONINFORMATION);
+				}
+				return 0;
 			case TRAY_MENU_EXIT:
 				if (MessageBoxW(state->mainWnd,
 					L"Are you sure you want to exit the wlines daemon?",
 					L"Exit daemon", MB_YESNO | MB_ICONQUESTION) == IDYES) {
 					removeTrayIcon(state);
+					uninstallKeyboardHook();
 					exit(0);
 				}
 				return 0;
@@ -1039,6 +1145,9 @@ void usage()
 		"\t-cs   Case-sensitive filter\n"
 		"\t-id   Output index of the selected line, or -1 when no match\n"
 		"\t-d    Run in daemon mode (stay running, communicate via pipe)\n"
+		"\t-bw   Block Windows key when daemon is running (default: enabled)\n"
+		"\t      Note: Only blocks standalone Windows key presses, not combinations\n"
+		"\t-nw   Don't block Windows key when daemon is running\n"
 		"\n"
 		"OPTIONS:\n"
 		"\t-l    <count>   Amount of lines to show in list\n"
@@ -1097,6 +1206,7 @@ int main(int argc, char **argv)
 			.fontName = "Courier New",
 			.fontSize = 24,
 			.lineCount = 15,
+			.blockWindowsKey = true,
 		},
 		.keepRunning = true,
 #ifdef DAEMON_MODE
@@ -1120,6 +1230,10 @@ int main(int argc, char **argv)
 			state.settings.outputIndex = true;
 		} else if (!strcmp(argv[i], "-d")) {
 			state.daemonMode = true;
+		} else if (!strcmp(argv[i], "-bw")) {
+			state.settings.blockWindowsKey = true;
+		} else if (!strcmp(argv[i], "-nw")) {
+			state.settings.blockWindowsKey = false;
 		} else if (i + 1 == argc) {
 			usage();
 		// Options
@@ -1199,6 +1313,13 @@ int main(int argc, char **argv)
 		
 		logMessage("Starting wlines daemon - creating pipe thread");
 		
+		// Install keyboard hook to block Windows key if enabled
+		if (state.settings.blockWindowsKey) {
+			installKeyboardHook();
+		} else {
+			logMessage("Windows key blocking disabled by command line option");
+		}
+		
 		// Start pipe thread
 		state.hPipeThread = CreateThread(NULL, 0, pipeThreadProc, &state, 0, NULL);
 		if (!state.hPipeThread) {
@@ -1237,6 +1358,7 @@ int main(int argc, char **argv)
 	state.keepRunning = false;
 	if (state.daemonMode) {
 		removeTrayIcon(&state);
+		uninstallKeyboardHook();
 	}
 	if (state.hPipeThread) {
 		WaitForSingleObject(state.hPipeThread, 1000);
