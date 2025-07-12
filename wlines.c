@@ -13,6 +13,7 @@
 #include <windows.h>
 #include <windowsx.h>
 #include <shlwapi.h>
+#include <shellapi.h>
 
 #include <stdint.h>
 #include <stdio.h>
@@ -40,6 +41,10 @@ typedef int ssize_t;
 #define PIPE_NAME L"\\\\.\\pipe\\wlines_pipe"
 #define PIPE_BUFFER_SIZE 65536
 #define WM_PIPE_DATA (WM_USER + 1)
+#define WM_TRAYICON (WM_USER + 2)
+#define TRAY_ICON_ID 1
+#define TRAY_MENU_EXIT 1001
+#define TRAY_MENU_STATUS 1002
 
 #define ASSERT_WIN32_RESULT(result) do { \
 		if (!(result)) { \
@@ -160,6 +165,69 @@ void sendResultToPipe(state_t *state, const wchar_t *result)
 	free(utf8Result);
 }
 
+// System tray functions
+void addTrayIcon(state_t *state)
+{
+	if (!state->daemonMode) return;
+	
+	NOTIFYICONDATAW nid = { 0 };
+	nid.cbSize = sizeof(NOTIFYICONDATAW);
+	nid.hWnd = state->mainWnd;
+	nid.uID = TRAY_ICON_ID;
+	nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
+	nid.uCallbackMessage = WM_TRAYICON;
+	nid.hIcon = LoadIcon(NULL, IDI_APPLICATION);
+	wcscpy(nid.szTip, L"wlines daemon - Ready for connections");
+	
+	Shell_NotifyIconW(NIM_ADD, &nid);
+}
+
+void removeTrayIcon(state_t *state)
+{
+	if (!state->daemonMode) return;
+	
+	NOTIFYICONDATAW nid = { 0 };
+	nid.cbSize = sizeof(NOTIFYICONDATAW);
+	nid.hWnd = state->mainWnd;
+	nid.uID = TRAY_ICON_ID;
+	
+	Shell_NotifyIconW(NIM_DELETE, &nid);
+}
+
+void updateTrayIcon(state_t *state, const wchar_t *tooltip)
+{
+	if (!state->daemonMode) return;
+	
+	NOTIFYICONDATAW nid = { 0 };
+	nid.cbSize = sizeof(NOTIFYICONDATAW);
+	nid.hWnd = state->mainWnd;
+	nid.uID = TRAY_ICON_ID;
+	nid.uFlags = NIF_TIP;
+	wcsncpy(nid.szTip, tooltip, sizeof(nid.szTip) / sizeof(wchar_t) - 1);
+	
+	Shell_NotifyIconW(NIM_MODIFY, &nid);
+}
+
+void showTrayMenu(state_t *state)
+{
+	POINT pt;
+	GetCursorPos(&pt);
+	
+	HMENU hMenu = CreatePopupMenu();
+	AppendMenuW(hMenu, MF_STRING, TRAY_MENU_STATUS, L"Show Status");
+	AppendMenuW(hMenu, MF_SEPARATOR, 0, NULL);
+	AppendMenuW(hMenu, MF_STRING, TRAY_MENU_EXIT, L"Exit Daemon");
+	
+	// Required for popup menus to work correctly
+	SetForegroundWindow(state->mainWnd);
+	
+	TrackPopupMenu(hMenu, TPM_RIGHTBUTTON, pt.x, pt.y, 0, state->mainWnd, NULL);
+	
+	// Required cleanup
+	PostMessage(state->mainWnd, WM_NULL, 0, 0);
+	DestroyMenu(hMenu);
+}
+
 void updateEntriesFromPipe(state_t *state, const char *utf8Data, size_t dataSize)
 {
 	// Free existing entries
@@ -252,8 +320,9 @@ DWORD WINAPI pipeThreadProc(LPVOID lpParam)
 	return 0;
 }
 
-void windowEventLoop()
+void windowEventLoop(state_t *state)
 {
+	(void)state; // Suppress unused parameter warning
 	MSG msg;
 	while (GetMessageW(&msg, 0, 0, 0)) {
 		TranslateMessage(&msg);
@@ -450,6 +519,7 @@ LRESULT CALLBACK editWndProc(HWND wnd, UINT msg, WPARAM wparam, LPARAM lparam)
 			// In daemon mode, hide window and close pipe. Otherwise quit.
 			if (state->daemonMode) {
 				ShowWindow(state->mainWnd, SW_HIDE);
+				updateTrayIcon(state, L"wlines daemon - Ready for connections");
 				if (state->hPipe) {
 					// Give the client time to read the result
 					Sleep(100);
@@ -464,6 +534,7 @@ LRESULT CALLBACK editWndProc(HWND wnd, UINT msg, WPARAM wparam, LPARAM lparam)
 		case VK_ESCAPE: // Escape - Exit
 			if (state->daemonMode) {
 				ShowWindow(state->mainWnd, SW_HIDE);
+				updateTrayIcon(state, L"wlines daemon - Ready for connections");
 				if (state->hPipe) {
 					// Give the client time to read any result
 					Sleep(100);
@@ -541,9 +612,49 @@ LRESULT CALLBACK mainWndProc(HWND wnd, UINT msg, WPARAM wparam, LPARAM lparam)
 	const size_t pageStartI = page * state->lineCount;
 
 	switch (msg) {
+	case WM_TRAYICON: // System tray icon messages
+		if (state->daemonMode) {
+			switch (lparam) {
+			case WM_RBUTTONDOWN:
+			case WM_CONTEXTMENU:
+				showTrayMenu(state);
+				return 0;
+			case WM_LBUTTONDBLCLK:
+				MessageBoxW(state->mainWnd, 
+					L"wlines daemon is running and ready for connections.\n\n"
+					L"Send data via pipe to show the selection GUI.",
+					L"wlines daemon status", MB_OK | MB_ICONINFORMATION);
+				return 0;
+			}
+		}
+		return 0;
+	case WM_COMMAND: // Menu commands from tray
+		if (state->daemonMode) {
+			switch (LOWORD(wparam)) {
+			case TRAY_MENU_STATUS:
+				MessageBoxW(state->mainWnd,
+					L"wlines daemon is running and ready for connections.\n\n"
+					L"Send data via named pipe to show the selection GUI.\n"
+					L"Pipe name: \\\\.\\pipe\\wlines_pipe",
+					L"wlines daemon status", MB_OK | MB_ICONINFORMATION);
+				return 0;
+			case TRAY_MENU_EXIT:
+				if (MessageBoxW(state->mainWnd,
+					L"Are you sure you want to exit the wlines daemon?",
+					L"Exit daemon", MB_YESNO | MB_ICONQUESTION) == IDYES) {
+					removeTrayIcon(state);
+					exit(0);
+				}
+				return 0;
+			}
+		}
+		return 0;
 	case WM_PIPE_DATA: // New data received from pipe
 		SetWindowTextW(state->editWnd, L"");
 		updateSearchResults(state);
+		if (state->daemonMode) {
+			updateTrayIcon(state, L"wlines daemon - Selection window active");
+		}
 		forceForeground(state->mainWnd);
 		SetFocus(state->editWnd);
 		return 0;
@@ -682,7 +793,6 @@ LRESULT CALLBACK mainWndProc(HWND wnd, UINT msg, WPARAM wparam, LPARAM lparam)
 
 	return DefWindowProc(wnd, msg, wparam, lparam);
 }
-
 
 void createWindow(state_t *state)
 {
@@ -1017,12 +1127,16 @@ int main(int argc, char **argv)
 	} else {
 		// In daemon mode, start hidden
 		ShowWindow(state.mainWnd, SW_HIDE);
+		addTrayIcon(&state);
 	}
 	
 	windowEventLoop(&state);
 
 	// Cleanup
 	state.keepRunning = false;
+	if (state.daemonMode) {
+		removeTrayIcon(&state);
+	}
 	if (state.hPipeThread) {
 		WaitForSingleObject(state.hPipeThread, 1000);
 		CloseHandle(state.hPipeThread);
