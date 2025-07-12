@@ -768,15 +768,34 @@ LRESULT CALLBACK mainWndProc(HWND wnd, UINT msg, WPARAM wparam, LPARAM lparam)
 		const size_t newIdx = max(0, min(state->searchResultCount - 1,
 				pageStartI + (mx - entriesTop) / state->settings.fontSize));
 		if (newIdx == state->selectedResultIndex) {
-			if (state->settings.outputIndex) {
-				printf("%zu\n", state->searchResults[state->selectedResultIndex]);
+			// Handle double-click - output the selected item
+			if (state->daemonMode) {
+				if (state->settings.outputIndex) {
+					wchar_t indexStr[32];
+					swprintf(indexStr, 32, L"%zu", state->searchResults[state->selectedResultIndex]);
+					sendResultToPipe(state, indexStr);
+				} else {
+					sendResultToPipe(state, state->entries[state->searchResults[state->selectedResultIndex]]);
+				}
+				// Hide window and close pipe
+				ShowWindow(state->mainWnd, SW_HIDE);
+				updateTrayIcon(state, L"wlines daemon - Ready for connections");
+				if (state->hPipe) {
+					Sleep(100);
+					DisconnectNamedPipe(state->hPipe);
+					CloseHandle(state->hPipe);
+					state->hPipe = NULL;
+				}
 			} else {
-				printUtf16AsUtf8(state->entries[state->searchResults[state->selectedResultIndex]]);
-			}
-
-			// Quit if control isn't held
-			if (!(GetKeyState(VK_CONTROL) & 0x8000)) {
-				exit(0);
+				if (state->settings.outputIndex) {
+					printf("%zu\n", state->searchResults[state->selectedResultIndex]);
+				} else {
+					printUtf16AsUtf8(state->entries[state->searchResults[state->selectedResultIndex]]);
+				}
+				// Quit if control isn't held
+				if (!(GetKeyState(VK_CONTROL) & 0x8000)) {
+					exit(0);
+				}
 			}
 		} else {
 			state->selectedResultIndex = newIdx;
