@@ -1,4 +1,5 @@
 *.exe
+*.log
 compile_commands.json
 .cache/
 test.sh

@@ -1,0 +1,24 @@
+# wlines Daemon Configuration
+# This file contains startup arguments for the wlines daemon
+# Edit these settings and restart the daemon to apply changes
+
+# Appearance settings
+-bg #1e1e1e
+-fg #ffffff
+-sbg #0078d4
+-sfg #ffffff
+-tbg #2d2d2d
+-tfg #ffffff
+
+# Font settings
+-f "Consolas"
+-fs 18
+
+# Window settings
+-l 12
+-px 8
+-wx 1000
+
+# Other settings
+# -cs    # Uncomment for case-sensitive search
+# -id    # Uncomment to output index instead of text
