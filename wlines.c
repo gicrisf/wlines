@@ -20,6 +20,27 @@
 #include <string.h>
 #include <stdbool.h>
 
+// Define ssize_t for Windows/MinGW
+#ifdef _WIN32
+#ifndef _SSIZE_T_DEFINED
+#define _SSIZE_T_DEFINED
+#ifdef _WIN64
+typedef __int64 ssize_t;
+#else
+typedef int ssize_t;
+#endif
+#endif
+#endif
+
+// Define version if not provided by compiler
+#ifndef WLINES_VERSION
+#define WLINES_VERSION "dev"
+#endif
+
+#define PIPE_NAME L"\\\\.\\pipe\\wlines_pipe"
+#define PIPE_BUFFER_SIZE 65536
+#define WM_PIPE_DATA (WM_USER + 1)
+
 #define ASSERT_WIN32_RESULT(result) do { \
 		if (!(result)) { \
 			fprintf(stderr, "Windows error %ld on line %d\n", GetLastError(), __LINE__); \
@@ -68,6 +89,13 @@ typedef struct {
 	size_t searchResultCount;
 	size_t *searchResults; // index into `entries`
 	size_t selectedResultIndex; // index into `searchResults`
+	
+	// Pipe communication
+	HANDLE hPipe;
+	HANDLE hPipeThread;
+	bool keepRunning;
+	bool daemonMode;
+	wchar_t *currentResult;
 } state_t;
 
 typedef struct {
@@ -109,6 +137,119 @@ void bufShrink(buf_t *buf)
 {
 	buf->cap = buf->count;
 	buf->data = xrealloc(buf->data, buf->cap);
+}
+
+// Pipe communication functions
+void sendResultToPipe(state_t *state, const wchar_t *result)
+{
+	if (!state->hPipe) return;
+	
+	// Convert result to UTF-8
+	const size_t len = wcslen(result);
+	const int bytecount = WideCharToMultiByte(CP_UTF8, 0, result, len, 0, 0, 0, 0);
+	char *utf8Result = xrealloc(0, bytecount + 1);
+	WideCharToMultiByte(CP_UTF8, 0, result, len, utf8Result, bytecount, 0, 0);
+	utf8Result[bytecount] = '\0';
+	
+	DWORD bytesWritten;
+	WriteFile(state->hPipe, utf8Result, bytecount, &bytesWritten, NULL);
+	
+	// Ensure the data is flushed to the client
+	FlushFileBuffers(state->hPipe);
+	
+	free(utf8Result);
+}
+
+void updateEntriesFromPipe(state_t *state, const char *utf8Data, size_t dataSize)
+{
+	// Free existing entries
+	if (state->entries) {
+		free(state->entries);
+		state->entries = NULL;
+		state->entryCount = 0;
+	}
+	
+	// Convert UTF-8 to UTF-16
+	const size_t charCount = MultiByteToWideChar(CP_UTF8, 0, utf8Data, dataSize, 0, 0);
+	wchar_t *utf16Data = xrealloc(0, (charCount + 1) * sizeof(wchar_t));
+	MultiByteToWideChar(CP_UTF8, 0, utf8Data, dataSize, utf16Data, charCount);
+	utf16Data[charCount] = L'\0';
+	
+	// Parse entries
+	buf_t entryBuf = { 0 };
+	size_t lineStartI = 0;
+	state->entryCount = 0;
+	
+	for (size_t i = 0; i < charCount; i++) {
+		if (utf16Data[i] == L'\n' || i == charCount - 1) {
+			bufAdd(&entryBuf, sizeof(wchar_t*));
+			((wchar_t**)entryBuf.data)[state->entryCount] = &utf16Data[lineStartI];
+			utf16Data[i + (utf16Data[i] != L'\n')] = L'\0';
+			lineStartI = i + 1;
+			state->entryCount++;
+		}
+	}
+	
+	bufShrink(&entryBuf);
+	state->entries = entryBuf.data;
+	
+	// Reallocate search results array
+	state->searchResults = xrealloc(state->searchResults, state->entryCount * sizeof(size_t));
+	state->lineCount = min((size_t)state->settings.lineCount, state->entryCount);
+}
+
+DWORD WINAPI pipeThreadProc(LPVOID lpParam)
+{
+	state_t *state = (state_t*)lpParam;
+	
+	while (state->keepRunning) {
+		// Create named pipe
+		state->hPipe = CreateNamedPipeW(
+			PIPE_NAME,
+			PIPE_ACCESS_DUPLEX,
+			PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
+			1, // Max instances
+			PIPE_BUFFER_SIZE,
+			PIPE_BUFFER_SIZE,
+			0, // Default timeout
+			NULL
+		);
+		
+		if (state->hPipe == INVALID_HANDLE_VALUE) {
+			Sleep(1000);
+			continue;
+		}
+		
+		// Wait for client connection
+		if (ConnectNamedPipe(state->hPipe, NULL) || GetLastError() == ERROR_PIPE_CONNECTED) {
+			// Read data from pipe
+			char buffer[PIPE_BUFFER_SIZE];
+			DWORD bytesRead;
+			
+			if (ReadFile(state->hPipe, buffer, sizeof(buffer) - 1, &bytesRead, NULL)) {
+				buffer[bytesRead] = '\0';
+				
+				// Update entries and show window
+				updateEntriesFromPipe(state, buffer, bytesRead);
+				
+				// Clear textbox and show window
+				PostMessage(state->mainWnd, WM_PIPE_DATA, 0, 0);
+				
+				// Wait for the window to close and result to be sent
+				// The window event handler will close the pipe when done
+				while (state->hPipe && state->keepRunning) {
+					Sleep(100);
+				}
+			}
+		}
+		
+		if (state->hPipe) {
+			CloseHandle(state->hPipe);
+			state->hPipe = NULL;
+		}
+	}
+	
+	return 0;
 }
 
 void windowEventLoop()
@@ -209,7 +350,12 @@ LRESULT CALLBACK editWndProc(HWND wnd, UINT msg, WPARAM wparam, LPARAM lparam)
 
 	switch (msg) {
 	case WM_KILLFOCUS: // When focus is lost
-		exit(1);
+		if (state->daemonMode) {
+			ShowWindow(state->mainWnd, SW_HIDE);
+		} else {
+			exit(1);
+		}
+		break;
 	case WM_CHAR:; // When a character is written
 		LRESULT result = 0;
 		switch (wparam) {
@@ -269,26 +415,66 @@ LRESULT CALLBACK editWndProc(HWND wnd, UINT msg, WPARAM wparam, LPARAM lparam)
 		case VK_RETURN: // Enter - Output choice
 			// If no results or shift is held: print input, else: print result
 			if (state->selectedResultIndex == SELECTED_INDEX_NO_RESULT || (GetKeyState(VK_SHIFT) & 0x8000)) {
-				if (state->settings.outputIndex) {
-					printf("-1\n");
+				if (state->daemonMode) {
+					wchar_t *input = getTextboxString(state);
+					if (state->settings.outputIndex) {
+						sendResultToPipe(state, L"-1");
+					} else {
+						sendResultToPipe(state, input);
+					}
 				} else {
-					printUtf16AsUtf8(getTextboxString(state));
+					if (state->settings.outputIndex) {
+						printf("-1\n");
+					} else {
+						printUtf16AsUtf8(getTextboxString(state));
+					}
 				}
 			} else {
-				if (state->settings.outputIndex) {
-					printf("%zu\n", state->searchResults[state->selectedResultIndex]);
+				if (state->daemonMode) {
+					if (state->settings.outputIndex) {
+						wchar_t indexStr[32];
+						swprintf(indexStr, 32, L"%zu", state->searchResults[state->selectedResultIndex]);
+						sendResultToPipe(state, indexStr);
+					} else {
+						sendResultToPipe(state, state->entries[state->searchResults[state->selectedResultIndex]]);
+					}
 				} else {
-					printUtf16AsUtf8(state->entries[state->searchResults[state->selectedResultIndex]]);
+					if (state->settings.outputIndex) {
+						printf("%zu\n", state->searchResults[state->selectedResultIndex]);
+					} else {
+						printUtf16AsUtf8(state->entries[state->searchResults[state->selectedResultIndex]]);
+					}
 				}
 			}
 
-			// Quit if control isn't held
-			if (!ctrlPressed) {
+			// In daemon mode, hide window and close pipe. Otherwise quit.
+			if (state->daemonMode) {
+				ShowWindow(state->mainWnd, SW_HIDE);
+				if (state->hPipe) {
+					// Give the client time to read the result
+					Sleep(100);
+					DisconnectNamedPipe(state->hPipe);
+					CloseHandle(state->hPipe);
+					state->hPipe = NULL;
+				}
+			} else if (!ctrlPressed) {
 				exit(0);
 			}
 			return 0;
 		case VK_ESCAPE: // Escape - Exit
-			exit(1);
+			if (state->daemonMode) {
+				ShowWindow(state->mainWnd, SW_HIDE);
+				if (state->hPipe) {
+					// Give the client time to read any result
+					Sleep(100);
+					DisconnectNamedPipe(state->hPipe);
+					CloseHandle(state->hPipe);
+					state->hPipe = NULL;
+				}
+			} else {
+				exit(1);
+			}
+			return 0;
 		case VK_UP: // Up - Previous result
 			state->selectedResultIndex =
 				(state->selectedResultIndex - 1 + state->searchResultCount) % state->searchResultCount;
@@ -355,13 +541,20 @@ LRESULT CALLBACK mainWndProc(HWND wnd, UINT msg, WPARAM wparam, LPARAM lparam)
 	const size_t pageStartI = page * state->lineCount;
 
 	switch (msg) {
+	case WM_PIPE_DATA: // New data received from pipe
+		SetWindowTextW(state->editWnd, L"");
+		updateSearchResults(state);
+		forceForeground(state->mainWnd);
+		SetFocus(state->editWnd);
+		return 0;
 	case WM_TIMER: // Repeating timer to make sure we're the foreground window
 		if (wparam == FOREGROUND_TIMER_ID) {
 			if (GetForegroundWindow() == wnd) {
 				state->hadForeground = true;
-			} else if (state->hadForeground) {
+			} else if (state->hadForeground && !state->daemonMode) {
+				// Only exit on focus loss if not in daemon mode
 				exit(1);
-			} else {
+			} else if (!state->daemonMode) {
 				forceForeground(state->mainWnd);
 			}
 		}
@@ -650,6 +843,7 @@ void usage()
 		"\t-h    Show help and exit\n"
 		"\t-cs   Case-sensitive filter\n"
 		"\t-id   Output index of the selected line, or -1 when no match\n"
+		"\t-d    Run in daemon mode (stay running, communicate via pipe)\n"
 		"\n"
 		"OPTIONS:\n"
 		"\t-l    <count>   Amount of lines to show in list\n"
@@ -709,6 +903,11 @@ int main(int argc, char **argv)
 			.fontSize = 24,
 			.lineCount = 15,
 		},
+		.keepRunning = true,
+		.daemonMode = false,
+		.hPipe = NULL,
+		.hPipeThread = NULL,
+		.currentResult = NULL,
 	};
 
 	// Parse arguments
@@ -720,6 +919,8 @@ int main(int argc, char **argv)
 			state.settings.caseSensitiveSearch = true;
 		} else if (!strcmp(argv[i], "-id")) {
 			state.settings.outputIndex = true;
+		} else if (!strcmp(argv[i], "-d")) {
+			state.daemonMode = true;
 		} else if (i + 1 == argc) {
 			usage();
 		// Options
@@ -782,12 +983,47 @@ int main(int argc, char **argv)
 	}
 
 	loadFont(&state);
-	parseStdinEntries(&state);
+	
+	if (state.daemonMode) {
+		// In daemon mode, start with empty entries and create pipe thread
+		state.entryCount = 0;
+		state.entries = NULL;
+		state.searchResults = xrealloc(0, 1 * sizeof(size_t));
+		
+		// Start pipe thread
+		state.hPipeThread = CreateThread(NULL, 0, pipeThreadProc, &state, 0, NULL);
+		if (!state.hPipeThread) {
+			fprintf(stderr, "Failed to create pipe thread\n");
+			exit(1);
+		}
+	} else {
+		// Normal mode - parse stdin
+		parseStdinEntries(&state);
+	}
+	
 	state.lineCount = min((size_t)state.settings.lineCount, state.entryCount);
 	createWindow(&state);
-	updateSearchResults(&state);
-	state.selectedResultIndex = min((size_t)state.settings.selectedIndex, state.entryCount - 1);
-	windowEventLoop();
+	
+	// Only show window initially if not in daemon mode or if we have entries
+	if (!state.daemonMode) {
+		updateSearchResults(&state);
+		state.selectedResultIndex = min((size_t)state.settings.selectedIndex, state.entryCount - 1);
+	} else {
+		// In daemon mode, start hidden
+		ShowWindow(state.mainWnd, SW_HIDE);
+	}
+	
+	windowEventLoop(&state);
+
+	// Cleanup
+	state.keepRunning = false;
+	if (state.hPipeThread) {
+		WaitForSingleObject(state.hPipeThread, 1000);
+		CloseHandle(state.hPipeThread);
+	}
+	if (state.hPipe) {
+		CloseHandle(state.hPipe);
+	}
 
 	return 1;
 }
