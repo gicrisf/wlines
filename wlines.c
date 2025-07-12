@@ -1014,7 +1014,11 @@ int main(int argc, char **argv)
 			.lineCount = 15,
 		},
 		.keepRunning = true,
+#ifdef DAEMON_MODE
+		.daemonMode = true,  // Force daemon mode when compiled with -DDAEMON_MODE
+#else
 		.daemonMode = false,
+#endif
 		.hPipe = NULL,
 		.hPipeThread = NULL,
 		.currentResult = NULL,
@@ -1093,6 +1097,14 @@ int main(int argc, char **argv)
 	}
 
 	loadFont(&state);
+	
+	// Hide console window in daemon mode
+	if (state.daemonMode) {
+		HWND consoleWindow = GetConsoleWindow();
+		if (consoleWindow) {
+			ShowWindow(consoleWindow, SW_HIDE);
+		}
+	}
 	
 	if (state.daemonMode) {
 		// In daemon mode, start with empty entries and create pipe thread
