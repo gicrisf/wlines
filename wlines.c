@@ -46,7 +46,6 @@ typedef int ssize_t;
 #define TRAY_MENU_EXIT 1001
 #define TRAY_MENU_STATUS 1002
 
-
 #define ASSERT_WIN32_RESULT(result) do { \
 		if (!(result)) { \
 			fprintf(stderr, "Windows error %ld on line %d\n", GetLastError(), __LINE__); \
@@ -131,7 +130,7 @@ void *xrealloc(void *ptr, size_t sz)
 	ptr = realloc(ptr, sz);
 	if (!ptr) {
 		fprintf(stderr, "Out of memory\n");
-		exit(1);
+		exit(0);
 	}
 	return ptr;
 }
@@ -450,14 +449,23 @@ LRESULT CALLBACK editWndProc(HWND wnd, UINT msg, WPARAM wparam, LPARAM lparam)
 		if (state->daemonMode) {
 			logMessage("Selection window lost focus - hiding window");
 			ShowWindow(state->mainWnd, SW_HIDE);
+			updateTrayIcon(state, L"wlines daemon - Ready for connections");
+			if (state->hPipe) {
+				// Give the client time to read any result
+				Sleep(100);
+				DisconnectNamedPipe(state->hPipe);
+				CloseHandle(state->hPipe);
+				state->hPipe = NULL;
+			}
 		} else {
+			// In non-daemon mode, losing focus should exit the application to avoid lingering windows.
 			exit(1);
 		}
 		break;
 	case WM_CHAR:; // When a character is written
 		LRESULT result = 0;
 		switch (wparam) {
-		case 0x01:; // Ctrl+A - Select everythinig
+		case 0x01:; // Ctrl+A - Select everything
 			const size_t length = CallWindowProc(state->editWndProc, wnd, EM_LINELENGTH, 0, 0);
 			CallWindowProc(state->editWndProc, wnd, EM_SETSEL, 0, length);
 			return 0;
