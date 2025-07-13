@@ -28,11 +28,11 @@ jobs:
       - uses: actions/download-artifact@v4
         with: 
           name: binaries
-    - name: Release
-      uses: softprops/action-gh-release@v1
-      with: 
-       files: | 
-          wlines.exe
-          wlines-daemon.exe 
+      - name: Release
+        uses: softprops/action-gh-release@v1
+        with: 
+         files: | 
+            wlines.exe
+            wlines-daemon.exe 
 
 
