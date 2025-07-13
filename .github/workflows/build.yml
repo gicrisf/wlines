@@ -1,5 +1,5 @@
 name: Build
-run-name: ${{ github.actor }} is testing out actions.
+run-name: ${{ github.actor }} is testing out releases.
 on: [push]
 jobs:
   build:
@@ -12,10 +12,27 @@ jobs:
       run: sudo apt install gcc-mingw-w64-x86-64
     - name: Make
       run: make
-    - name: Upload artifact
+    - name: Upload artifacts
       uses: actions/upload-artifact@v4
       with:
         name: binaries
         path: | 
           wlines.exe
           wlines-daemon.exe 
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download artifacts
+      - uses: actions/download-artifact@v4
+        with: 
+          name: binaries
+    - name: Release
+      uses: softprops/action-gh-release@v1
+      with: 
+       files: | 
+          wlines.exe
+          wlines-daemon.exe 
+
+
