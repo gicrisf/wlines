@@ -1,4 +1,5 @@
 name: Build
+run-name: ${{ github.actor }} is testing out actions.
 on: [push]
 jobs:
   build:
@@ -6,33 +7,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - name: Checkout repo
-      uses: actions/checkout@v1
+      uses: actions/checkout@v4
     - name: Install deps
       run: sudo apt install gcc-mingw-w64-x86-64
-    - name: Build
-      run: CC=x86_64-w64-mingw32-gcc make
+    - name: Make
+      run: make
     - name: Upload artifact
-      uses: actions/upload-artifact@master
+      uses: actions/upload-artifact@v4
       with:
-        name: wlines
-        path: wlines.exe
-    - name: Create Release
-      id: create_release
-      uses: actions/create-release@v1
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      with:
-        tag_name: ci-${{ github.sha }}
-        release_name: CI build
-        draft: false
-        prerelease: false
-    - name: Upload release asset
-      id: upload-release-asset 
-      uses: actions/upload-release-asset@v1
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      with:
-        upload_url: ${{ steps.create_release.outputs.upload_url }}
-        asset_path: wlines.exe
-        asset_name: wlines.exe
-        asset_content_type: application/octet-stream
+        name: binaries
+        path: | 
+          wlines.exe
+          wlines-daemon.exe 
