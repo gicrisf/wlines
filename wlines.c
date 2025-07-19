@@ -104,21 +104,26 @@ typedef struct {
 	size_t count, cap;
 } buf_t;
 
-// Logging function for daemon mode
+// Logging function for daemon mode (dev compiled)
 void logMessage(const char *message)
 {
-	FILE *logFile = fopen("wlines-daemon.log", "a");
-	if (logFile) {
-		// Get current time
-		SYSTEMTIME st;
-		GetLocalTime(&st);
-		
-		fprintf(logFile, "[%04d-%02d-%02d %02d:%02d:%02d] %s\n",
-			st.wYear, st.wMonth, st.wDay,
-			st.wHour, st.wMinute, st.wSecond,
-			message);
-		fclose(logFile);
-	}
+    #ifndef WLINES_VERSION
+    return;
+    #else
+    if (strcmp(WLINES_VERSION, "dev") != 0) return;
+    #endif
+
+    FILE *logFile = fopen("wlines.log", "a");
+    if (logFile) {
+        SYSTEMTIME st;
+        GetLocalTime(&st);
+        
+        fprintf(logFile, "[%04d-%02d-%02d %02d:%02d:%02d] %s\n",
+            st.wYear, st.wMonth, st.wDay,
+            st.wHour, st.wMinute, st.wSecond,
+            message);
+        fclose(logFile);
+    }
 }
 
 void *xrealloc(void *ptr, size_t sz)
@@ -391,7 +396,7 @@ LRESULT CALLBACK editWndProc(HWND wnd, UINT msg, WPARAM wparam, LPARAM lparam)
 			}
 		} else {
 			// In non-daemon mode, losing focus should exit the application to avoid lingering windows.
-			exit(1);
+			exit(0);
 		}
 		break;
 	case WM_CHAR:; // When a character is written
