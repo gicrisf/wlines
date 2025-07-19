@@ -978,6 +978,104 @@ void usage()
 	exit(1);
 }
 
+int parseFilterMode(const char *mode) {
+    if (!strcasecmp(mode, "complete") || !strcasecmp(mode, "0")) 
+        return FM_COMPLETE;
+    if (!strcasecmp(mode, "keywords") || !strcasecmp(mode, "1")) 
+        return FM_KEYWORDS;
+    return FM_COMPLETE; // default mode
+}
+
+void loadConfigFile(settings_t *settings, const char *filename) {
+    FILE *file = fopen(filename, "r");
+    if (!file) return;
+
+    char line[256];
+    while (fgets(line, sizeof(line), file)) {
+        // Remove newline and skip empty/commented lines
+        line[strcspn(line, "\r\n")] = 0;
+        if (line[0] == '#' || line[0] == '\0') continue;
+        
+        char *key = strtok(line, " ");
+        char *value = strtok(NULL, "");
+        if (!key || !value) continue;
+
+        // Parse all supported options
+        if (!strcmp(key, "line_count") || !strcmp(key, "-l")) 
+            settings->lineCount = atoi(value);
+        else if (!strcmp(key, "prompt") || !strcmp(key, "-p")) 
+            settings->promptText = _strdup(value);
+        else if (!strcmp(key, "filter_mode") || !strcmp(key, "-fm")) 
+            settings->filterMode = parseFilterMode(value);
+        else if (!strcmp(key, "initial_index") || !strcmp(key, "-si")) 
+            settings->selectedIndex = atoi(value);
+        else if (!strcmp(key, "padding") || !strcmp(key, "-px")) 
+            settings->padding = atoi(value);
+        else if (!strcmp(key, "width") || !strcmp(key, "-wx")) {
+            settings->width = atoi(value);
+            settings->centerWindow = true;
+        }
+        else if (!strcmp(key, "bg_color") || !strcmp(key, "-bg")) 
+            settings->bg = parseColor(value);
+        else if (!strcmp(key, "fg_color") || !strcmp(key, "-fg")) 
+            settings->fg = parseColor(value);
+        else if (!strcmp(key, "sel_bg_color") || !strcmp(key, "-sbg")) 
+            settings->bgSelect = parseColor(value);
+        else if (!strcmp(key, "sel_fg_color") || !strcmp(key, "-sfg")) 
+            settings->fgSelect = parseColor(value);
+        else if (!strcmp(key, "text_bg_color") || !strcmp(key, "-tbg")) 
+            settings->bgEdit = parseColor(value);
+        else if (!strcmp(key, "text_fg_color") || !strcmp(key, "-tfg")) 
+            settings->fgEdit = parseColor(value);
+        else if (!strcmp(key, "font") || !strcmp(key, "-f")) 
+            settings->fontName = _strdup(value);
+        else if (!strcmp(key, "font_size") || !strcmp(key, "-fs")) 
+            settings->fontSize = atoi(value);
+        else if (!strcmp(key, "case_sensitive") || !strcmp(key, "-cs")) 
+            settings->caseSensitiveSearch = true;
+        else if (!strcmp(key, "output_index") || !strcmp(key, "-id")) 
+            settings->outputIndex = true;
+    }
+    fclose(file);
+}
+
+void cleanupState(state_t *state) {
+    // 1. Free settings strings
+    if (state->settings.fontName) {
+        free(state->settings.fontName);
+        state->settings.fontName = NULL;
+    }
+    if (state->settings.promptText) {
+        free(state->settings.promptText);
+        state->settings.promptText = NULL;
+    }
+
+    // 2. Pipe cleanup
+    state->keepRunning = false;
+    if (state->hPipeThread) {
+        WaitForSingleObject(state->hPipeThread, 1000);
+        CloseHandle(state->hPipeThread);
+        state->hPipeThread = NULL;
+    }
+    if (state->hPipe) {
+        CloseHandle(state->hPipe);
+        state->hPipe = NULL;
+    }
+    
+    if (state->entries) {
+        for (size_t i = 0; i < state->entryCount; i++) {
+            free(state->entries[i]);
+        }
+        free(state->entries);
+        state->entries = NULL;
+    }
+    
+    if (state->searchResults) {
+        free(state->searchResults);
+        state->searchResults = NULL;
+    }
+}
+
 int main(int argc, char **argv)
 {
 	// Turn off stdout buffering
@@ -1010,6 +1108,9 @@ int main(int argc, char **argv)
 		.hPipeThread = NULL,
 		.currentResult = NULL,
 	};
+
+    // Load config file before processing command-line args
+	loadConfigFile(&state.settings, "wlines-config.txt");
 
 	// Parse arguments
 	for (int i = 1; i < argc; i++) {
@@ -1134,15 +1235,7 @@ int main(int argc, char **argv)
 	
 	windowEventLoop(&state);
 
-	// Cleanup
-	state.keepRunning = false;
-	if (state.hPipeThread) {
-		WaitForSingleObject(state.hPipeThread, 1000);
-		CloseHandle(state.hPipeThread);
-	}
-	if (state.hPipe) {
-		CloseHandle(state.hPipe);
-	}
-
+	// Cleanup	
+	cleanupState(&state);
 	return 1;
 }

@@ -11,8 +11,8 @@
 -tfg #ffffff
 
 # Font settings
--f "Consolas"
--fs 18
+# -f "Consolas"
+# -fs 18
 
 # Window settings
 -l 12
