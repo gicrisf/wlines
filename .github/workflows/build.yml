@@ -1,6 +1,8 @@
 name: Build
-run-name: ${{ github.actor }} is testing out releases.
-on: [push]
+on:
+  push:
+    tags:
+      - 'v*'
 jobs:
   build:
     name: Ubuntu->Windows Cross Compile
